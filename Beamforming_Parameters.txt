@@ -1,0 +1,30 @@
+Table 1: Basic Beamforming Parameters (From 5G_NR_BF&MIMO_ver1.pdf)
+Parameter	Object	Range / Values	Default	Description
+NRCELL-beamSet.basicBeamSet	NRCELL	#1, #2, #4, #6, #8, #4#4, #5#3, #6#2, #3#3#2, #2#2#2#2	-	Selects the basic beam set pattern defining rows and columns of beams
+NRCELL-beamSet.nrBtsBeamRefinementP2	NRCELL	true / false	false	Enables beam refinement with 4 refined beams per SSB beam
+NRCELL-beamSet.leftEdgeAngle	NRCELL	Degrees (e.g., 45°, 60°)	-	Defines left azimuth edge angle of beam coverage
+NRCELL-beamSet.rightEdgeAngle	NRCELL	Degrees (e.g., 45°, 60°)	-	Defines right azimuth edge angle of beam coverage
+NRCELL-beamSet.loweredgeangle	NRCELL	95° to 135° (digital), 45° to 135° (analog)	120°	Defines lower vertical edge angle of beam coverage
+NRCELL-beamSet.upperedgeangle	NRCELL	45° to 90° (digital), 45° to 135° (analog)	60°	Defines upper vertical edge angle of beam coverage
+mMIMOAntArrayMode	NRCELL	0 to 7 (various antenna array splits)	-	Defines allocation of active antenna TRX to cell (e.g., full 64TRX, left/right 32TRX, etc.)
+srsPowerThresholdForDIBm	NRCELL	-150 to 0 dBm	-120 dBm	RSRP threshold for fallback to legacy beamforming (codebook or SS/PBCH based)
+NRCELL.actUeCsirsCoexistCellCsirs	NRCELL	true / false	false	Enables coexistence of UE-specific CSI-RS with cell-specific CSI-RS
+NRCELL.actPdschBeamPowerBalance	NRCELL	true / false	false	Activates PDSCH power balancing for cell-specific and UE-specific CSI-RS
+NRCELL.actCsirsBeamPowerBalance	NRCELL	true / false	false	Activates UE-specific CSI-RS power balancing (requires actPdschBeamPowerBalance = true)
+NRCELL.beampoweroffsetthreshold	NRCELL	0 to 15 dB (step 1 dB)	6 dB	Limits the upper level of power balancing offset
+NRCELL.numDftBeamMuteRight	NRCELL	0 to N (number of beams muted on right side)	0	Number of rightmost DFT beams muted in horizontal plane
+NRCELL.numDftBeamMuteLeft	NRCELL	0 to N (number of beams muted on left side)	0	Number of leftmost DFT beams muted in horizontal plane
+dlMimoMode	NRCELL	30 (2x2 Closed Loop), 40 (4x4 Closed Loop), 50 (2x2 Open Loop), 60 (4x4 Open Loop), 70 (8x4 Closed Loop)	30 (2x2 Closed Loop)	Defines MIMO mode and beamforming type
+Table 2: SRS Based Beamforming Parameters (From CB008247 SRS based beamforming introduction.pdf)
+Parameter	Object	Range / Values	Default	Description
+srsTypeAllocForDlBm	NRCELL	'antenna switching', 'codebook'	-	Type of SRS allocation for downlink beamforming
+NRCELL.tmpActFeat1 (bit 16)	NRCELL	true / false	false	Enables downlink power balancing for Rank 4 UEs (introduced in 22R4)
+NRCELL.actPdschBeamPowerBalance	NRCELL	true / false	false	Enables PDSCH power balancing
+NRCELL.actCsirsBeamPowerBalance	NRCELL	true / false	false	Enables UE-specific CSI-RS power balancing (requires actPdschBeamPowerBalance = true)
+bestBeamPowerOffset	-	Table values (0, -1, -2, ..., -15 dB)	-	Power offset values used for power balancing
+deltaPdschPower	-	Corresponding power increase (0, 0.4, 0.8, ..., 2.8 dB)	-	Power increase applied to weaker beam during power balancing
+Table 3: Codebook Based Beamforming Parameters (From 5GC002200_PMI codebook Based Beamforming.pdf)
+Parameter	Object	Range / Values	Default	Description
+dlMimoMode	NRCELL	30 (2x2 Closed Loop), 40 (4x4 Closed Loop), 50 (2x2 Open Loop), 60 (4x4 Open Loop), 70 (8x4 Closed Loop)	30 (2x2 Closed Loop)	Enables codebook based beamforming with different MIMO modes
+PMI beams	-	Up to 256 beams	-	UE selects preferred beamforming weights using PMI from 8-port CSI-RS codebook
+CSI-RS resources	-	Up to 4 beamformed CSI-RS resources, each with 8 ports	-	CSI-RS resources used for beamforming and PMI selection

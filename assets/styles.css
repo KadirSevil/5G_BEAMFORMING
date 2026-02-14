@@ -1,0 +1,148 @@
+:root {
+  --bg: #f0f4f9;
+  --panel: #ffffff;
+  --text: #14345c;
+  --muted: #48658e;
+  --accent: #1593d0;
+  --accent-dark: #0f6fe5;
+  --border: #d9e4f1;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", Arial, sans-serif;
+}
+
+.page {
+  min-height: 100vh;
+  padding: 20px;
+}
+
+.hero {
+  background: linear-gradient(110deg, #e6f6ff, #f7fbff);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px 24px;
+  margin-bottom: 16px;
+}
+
+.hero h1 {
+  margin: 0;
+  color: #0f80bf;
+  font-size: 2rem;
+}
+
+.hero p {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.content-grid {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 14px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.controls h2 {
+  margin-top: 0;
+  color: #0d75ad;
+}
+
+.controls label {
+  display: block;
+  margin-top: 12px;
+  margin-bottom: 6px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.inline-options label {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 16px;
+}
+
+.note-box {
+  margin-top: 14px;
+  background: #e8f6ff;
+  border: 1px solid #c6e8ff;
+  border-radius: 8px;
+  color: #0a5682;
+  padding: 10px;
+  line-height: 1.45;
+}
+
+.workspace .tab-section {
+  padding: 10px 4px 4px;
+}
+
+.tab-section h3 {
+  margin-top: 8px;
+  margin-bottom: 8px;
+  color: #0f80bf;
+}
+
+.tab-section ul {
+  margin-top: 0;
+  margin-bottom: 10px;
+  color: #2b4f7e;
+  line-height: 1.45;
+}
+
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.kpi {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  background: #f8fbff;
+  min-height: 74px;
+}
+
+.kpi span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-bottom: 6px;
+}
+
+.kpi strong {
+  color: #0c3f80;
+  font-size: 1.05rem;
+}
+
+.two-column-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+@media (max-width: 1080px) {
+  .content-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 680px) {
+  .two-column-list {
+    grid-template-columns: 1fr;
+  }
+}
