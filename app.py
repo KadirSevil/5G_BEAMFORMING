@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import List, Tuple
+import base64
+import csv
+import io
 import math
 import re
 
@@ -214,6 +217,129 @@ def meters_to_latlon(dx_m: np.ndarray, dy_m: np.ndarray, lat0_deg: float, lon0_d
     lat = lat0_deg + dy_m * lat_scale
     lon = lon0_deg + dx_m * lon_scale
     return lat, lon
+
+
+def latlon_to_meters(lat_deg: float, lon_deg: float, lat0_deg: float, lon0_deg: float) -> tuple[float, float]:
+    dy = (lat_deg - lat0_deg) * 111320.0
+    dx = (lon_deg - lon0_deg) * 111320.0 * max(np.cos(np.deg2rad(lat0_deg)), 1e-6)
+    return dx, dy
+
+
+def _safe_float(value, default: float) -> float:
+    try:
+        if value is None or str(value).strip() == "":
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _safe_int(value, default: int) -> int:
+    try:
+        if value is None or str(value).strip() == "":
+            return int(default)
+        return int(float(value))
+    except Exception:
+        return int(default)
+
+
+def _safe_bool(value, default: bool) -> bool:
+    if value is None:
+        return bool(default)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
+def normalize_cell_record(raw_record: dict, defaults: dict, index_fallback: int) -> dict:
+    cell_id_default = f"Cell-{index_fallback}"
+    cell_id = str(raw_record.get("cell_id", cell_id_default)).strip() or cell_id_default
+
+    if raw_record.get("antenna_coord"):
+        lat_val, lon_val = parse_lat_lon(raw_record.get("antenna_coord"))
+    else:
+        lat_val = _safe_float(raw_record.get("lat"), defaults["lat"])
+        lon_val = _safe_float(raw_record.get("lon"), defaults["lon"])
+
+    beam_set = str(raw_record.get("beam_set", defaults["beam_set"])).strip() or defaults["beam_set"]
+    if beam_set not in BEAM_SET_DEFS:
+        beam_set = defaults["beam_set"]
+
+    ru_type = str(raw_record.get("ru_type", defaults["ru_type"])).strip() or defaults["ru_type"]
+    if ru_type not in RU_CONFIGS:
+        ru_type = defaults["ru_type"]
+
+    return {
+        "cell_id": cell_id,
+        "lat": lat_val,
+        "lon": lon_val,
+        "antenna_azimuth_deg": _safe_float(raw_record.get("antenna_azimuth_deg"), defaults["antenna_azimuth_deg"]),
+        "beam_set": beam_set,
+        "ru_type": ru_type,
+        "freq_ghz": _safe_float(raw_record.get("freq_ghz"), defaults["freq_ghz"]),
+        "d_h_lam": _safe_float(raw_record.get("d_h_lam"), defaults["d_h_lam"]),
+        "d_v_lam": _safe_float(raw_record.get("d_v_lam"), defaults["d_v_lam"]),
+        "tilt_offset": _safe_float(raw_record.get("tilt_offset"), defaults["tilt_offset"]),
+        "upper_edge": _safe_float(raw_record.get("upper_edge"), defaults["upper_edge"]),
+        "lower_edge": _safe_float(raw_record.get("lower_edge"), defaults["lower_edge"]),
+        "left_edge": _safe_float(raw_record.get("left_edge"), defaults["left_edge"]),
+        "right_edge": _safe_float(raw_record.get("right_edge"), defaults["right_edge"]),
+        "nr_bts_beam_refinement_p2": _safe_bool(raw_record.get("nr_bts_beam_refinement_p2"), defaults["nr_bts_beam_refinement_p2"]),
+        "mmimo_ant_array_mode": _safe_int(raw_record.get("mmimo_ant_array_mode"), defaults["mmimo_ant_array_mode"]),
+        "num_dft_beam_mute_right": _safe_int(raw_record.get("num_dft_beam_mute_right"), defaults["num_dft_beam_mute_right"]),
+        "num_dft_beam_mute_left": _safe_int(raw_record.get("num_dft_beam_mute_left"), defaults["num_dft_beam_mute_left"]),
+        "antenna_height": _safe_float(raw_record.get("antenna_height"), defaults["antenna_height"]),
+        "tx_power_w": _safe_float(raw_record.get("tx_power_w"), defaults["tx_power_w"]),
+    }
+
+
+def parse_uploaded_cells(contents: str | None, defaults: dict) -> tuple[list[dict], str]:
+    if not contents:
+        return [], ""
+
+    try:
+        payload = contents.split(",", 1)[1] if "," in contents else contents
+        decoded = base64.b64decode(payload)
+        text = decoded.decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(text))
+        cells: list[dict] = []
+        for i, row in enumerate(reader, start=2):
+            if not row or all(str(v or "").strip() == "" for v in row.values()):
+                continue
+            cells.append(normalize_cell_record(row, defaults, i))
+        return cells, ""
+    except Exception:
+        return [], "Upload parse failed (check CSV columns and encoding)."
+
+
+def parse_manual_cells(text: str | None, defaults: dict) -> tuple[list[dict], str]:
+    if not text or str(text).strip() == "":
+        return [], ""
+
+    rows: list[dict] = []
+    errors: list[str] = []
+    for i, line in enumerate(str(text).splitlines(), start=1):
+        row = line.strip()
+        if not row or row.startswith("#"):
+            continue
+        parts = [p.strip() for p in row.split(",")]
+        if len(parts) < 5:
+            errors.append(f"line {i}")
+            continue
+        rows.append(normalize_cell_record({
+            "cell_id": parts[0],
+            "lat": parts[1],
+            "lon": parts[2],
+            "antenna_azimuth_deg": parts[3],
+            "beam_set": parts[4],
+        }, defaults, i))
+
+    if errors:
+        return rows, f"Manual rows ignored: {', '.join(errors)}"
+    return rows, ""
 
 
 def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
@@ -586,6 +712,7 @@ def generate_beam_grid_diagram(beam_set_key, num_dft_beam_mute_right=0, num_dft_
 
     fig = go.Figure()
 
+    beam_id = 1
     for row_i, n_beams in enumerate(rows):
         y = n_rows - 1 - row_i
         x_offset = (max_cols - n_beams) / 2
@@ -593,19 +720,24 @@ def generate_beam_grid_diagram(beam_set_key, num_dft_beam_mute_right=0, num_dft_
         active_positions = apply_dft_beam_mute(base_positions, num_dft_beam_mute_left, num_dft_beam_mute_right)
 
         for col_j, x in enumerate(active_positions):
-            color = BEAM_COLORS[(row_i * max_cols + col_j) % len(BEAM_COLORS)]
+            current_beam_id = beam_id
+            color = BEAM_COLORS[(current_beam_id - 1) % len(BEAM_COLORS)]
             fig.add_trace(go.Scatter(
                 x=[x], y=[y],
                 mode='markers+text',
                 marker=dict(size=42, color=color,
                             line=dict(width=2, color='#333333'),
                             symbol='circle'),
-                text=[f'{row_i+1}.{col_j+1}'],
+                text=[f'B{current_beam_id}'],
                 textposition='middle center',
                 textfont=dict(size=10, color='white', family='Arial Black'),
                 showlegend=False,
-                hovertemplate=f'Row {row_i+1}, Col {col_j+1}<extra></extra>',
+                hovertemplate=(
+                    f'Beam ID: {current_beam_id}<br>'
+                    f'Row {row_i+1}, Col {col_j+1}<extra></extra>'
+                ),
             ))
+            beam_id += 1
 
     fig.update_layout(
         template='plotly_white',
@@ -640,115 +772,243 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
                             antenna_lon=29.94555084488382,
                             antenna_azimuth_deg=0.0,
                             antenna_height_m=30.0,
-                            active_beam_ids=None):
-    bs = BEAM_SET_DEFS[beam_set_key]
-    ru = RU_CONFIGS[ru_type]
-    rows = bs["rows"]
-    n_rows = len(rows)
-    az_opening = az_opening_override if az_opening_override else bs["az_opening"]
-    az_half = az_opening / 2
+                            active_beam_ids=None,
+                            map_perspective_mode="flat-2d",
+                            map_theme_mode="carto-positron",
+                            cluster_cells=None):
+    base_cell = {
+        "cell_id": "Cell-1",
+        "lat": float(antenna_lat),
+        "lon": float(antenna_lon),
+        "antenna_azimuth_deg": float(antenna_azimuth_deg),
+        "beam_set": beam_set_key,
+        "ru_type": ru_type,
+        "freq_ghz": float(freq_ghz),
+        "d_h_lam": float(d_h_lam),
+        "d_v_lam": float(d_v_lam),
+        "tilt_offset": float(tilt_offset),
+        "upper_edge": float(upper_edge_angle),
+        "lower_edge": float(lower_edge_angle),
+        "left_edge": float(az_opening_override / 2 if az_opening_override else 0),
+        "right_edge": float(az_opening_override / 2 if az_opening_override else 0),
+        "nr_bts_beam_refinement_p2": bool(nr_bts_beam_refinement_p2),
+        "mmimo_ant_array_mode": int(mmimo_ant_array_mode),
+        "num_dft_beam_mute_right": int(num_dft_beam_mute_right),
+        "num_dft_beam_mute_left": int(num_dft_beam_mute_left),
+        "antenna_height": float(antenna_height_m),
+        "tx_power_w": float(tx_power_w),
+    }
+    cell_configs = cluster_cells if cluster_cells else [base_cell]
+    if not cell_configs:
+        cell_configs = [base_cell]
 
-    c = 3e8
-    freq = freq_ghz * 1e9
-    lam = c / freq
-    k = 2 * np.pi / lam
-    d_h = d_h_lam * lam
-    d_v = d_v_lam * lam
-    n_col, n_row = apply_mmimo_array_mode(ru["n_col"], ru["n_row"], mmimo_ant_array_mode)
+    lat_center = float(np.mean([c["lat"] for c in cell_configs]))
+    lon_center = float(np.mean([c["lon"] for c in cell_configs]))
 
-    if n_rows == 1:
-        el_centers = [tilt_offset]
-    else:
-        el_span = upper_edge_angle - lower_edge_angle
-        el_centers = [upper_edge_angle - i * el_span / (n_rows - 1) + tilt_offset
-                      for i in range(n_rows)]
+    site_xy = []
+    for cell in cell_configs:
+        sx, sy = latlon_to_meters(float(cell["lat"]), float(cell["lon"]), lat_center, lon_center)
+        site_xy.append((sx, sy))
 
-    coverage_radius_m = 8000.0
-    grid_n = 151
+    max_site_dist = max(np.hypot(sx, sy) for sx, sy in site_xy) if site_xy else 0.0
+    coverage_radius_m = float(min(26000.0, max(8000.0, max_site_dist + 8000.0)))
+    grid_n = 151 if coverage_radius_m <= 13000 else (131 if coverage_radius_m <= 19000 else 111)
+
     x_local = np.linspace(-coverage_radius_m, coverage_radius_m, grid_n)
     y_local = np.linspace(-coverage_radius_m, coverage_radius_m, grid_n)
     X, Y = np.meshgrid(x_local, y_local)
 
-    dx = X
-    dy = Y
-    d2d = np.sqrt(dx**2 + dy**2) + 1e-6
+    dominant_rx = np.full_like(X, -400.0, dtype=float)
+    dominant_cell_idx = np.full(X.shape, -1, dtype=int)
+    dominant_beam = np.full(X.shape, 0, dtype=int)
+    dominant_d3d = np.full(X.shape, 0.0, dtype=float)
+
+    secondary_rx = np.full_like(X, -400.0, dtype=float)
+    secondary_cell_idx = np.full(X.shape, -1, dtype=int)
+    secondary_beam = np.full(X.shape, 0, dtype=int)
+
+    c = 3e8
     h_ue = 1.5
-    d3d = np.sqrt(d2d**2 + (antenna_height_m - h_ue)**2)
 
-    abs_bearing = np.rad2deg(np.arctan2(dy, dx))
-    rel_az = ((abs_bearing - antenna_azimuth_deg + 180) % 360) - 180
-    rel_el = np.rad2deg(np.arctan2(h_ue - antenna_height_m, d2d))
+    for cell_idx, cell in enumerate(cell_configs):
+        bs_key = cell.get("beam_set", beam_set_key)
+        if bs_key not in BEAM_SET_DEFS:
+            bs_key = beam_set_key
+        ru_key = cell.get("ru_type", ru_type)
+        if ru_key not in RU_CONFIGS:
+            ru_key = ru_type
 
-    PHI_RAD = np.deg2rad(rel_az)
-    THETA_RAD = np.deg2rad(rel_el)
+        bs = BEAM_SET_DEFS[bs_key]
+        ru = RU_CONFIGS[ru_key]
+        rows = bs["rows"]
+        n_rows = len(rows)
+        az_opening = float(cell.get("left_edge", 0.0)) + float(cell.get("right_edge", 0.0))
+        if az_opening <= 0:
+            az_opening = bs["az_opening"]
+        az_half = az_opening / 2.0
 
-    combined_gain = np.full_like(X, -80.0)
-    beam_owner = np.full(X.shape, -1, dtype=int)
-    beam_counter = 1
+        freq_cell = float(cell.get("freq_ghz", freq_ghz))
+        lam = c / (freq_cell * 1e9)
+        k = 2 * np.pi / lam
+        d_h = float(cell.get("d_h_lam", d_h_lam)) * lam
+        d_v = float(cell.get("d_v_lam", d_v_lam)) * lam
 
-    for row_i, n_beams_in_row in enumerate(rows):
-        el_center = el_centers[row_i]
-        if n_beams_in_row == 1:
-            az_positions = [0.0]
+        n_col, n_row = apply_mmimo_array_mode(
+            ru["n_col"],
+            ru["n_row"],
+            int(cell.get("mmimo_ant_array_mode", mmimo_ant_array_mode)),
+        )
+
+        tilt_val = float(cell.get("tilt_offset", tilt_offset))
+        upper_edge_val = float(cell.get("upper_edge", upper_edge_angle))
+        lower_edge_val = float(cell.get("lower_edge", lower_edge_angle))
+
+        if n_rows == 1:
+            el_centers = [tilt_val]
         else:
-            step = az_opening / n_beams_in_row
-            az_positions = [(-az_half + step/2) + j * step for j in range(n_beams_in_row)]
-        az_positions = apply_dft_beam_mute(az_positions, num_dft_beam_mute_left, num_dft_beam_mute_right)
+            el_span = upper_edge_val - lower_edge_val
+            el_centers = [upper_edge_val - i * el_span / (n_rows - 1) + tilt_val for i in range(n_rows)]
 
-        active_beams_in_row = max(1, len(az_positions))
-        az_beam_half = (az_opening / active_beams_in_row) / 2 * 1.3
-        el_beam_half = (abs(upper_edge_angle - lower_edge_angle) / max(n_rows, 1)) / 2 * 1.3 if n_rows > 1 else 12
+        site_x, site_y = site_xy[cell_idx]
+        dx = X - site_x
+        dy = Y - site_y
+        d2d = np.sqrt(dx**2 + dy**2) + 1e-6
 
-        for az_center in az_positions:
-            current_beam_id = beam_counter
-            beam_counter += 1
-            if active_beam_ids is not None and current_beam_id not in active_beam_ids:
-                continue
-            for az_ref, el_ref in get_refined_centers(
-                az_center, el_center, az_beam_half, el_beam_half, nr_bts_beam_refinement_p2
-            ):
-                phi_s = np.deg2rad(az_ref)
-                theta_s = np.deg2rad(el_ref)
-                AF = array_factor_2d(PHI_RAD, THETA_RAD, n_col, n_row, d_h, d_v, k, phi_s, theta_s)
-                EP = element_pattern_2d(rel_az, rel_el)
-                gain = 20 * np.log10(np.abs(AF) + 1e-12) + EP
-                mask = gain > combined_gain
-                combined_gain = np.where(mask, gain, combined_gain)
-                beam_owner = np.where(mask, current_beam_id, beam_owner)
+        ant_height = float(cell.get("antenna_height", antenna_height_m))
+        d3d = np.sqrt(d2d**2 + (ant_height - h_ue)**2)
 
-    pl_los = 32.4 + 21 * np.log10(d3d) + 20 * np.log10(freq_ghz)
-    pl_nlos = 13.54 + 39.08 * np.log10(d3d) + 20 * np.log10(freq_ghz) - 0.6 * (h_ue - 1.5)
-    path_loss = np.maximum(pl_los, pl_nlos)
+        azimuth = float(cell.get("antenna_azimuth_deg", antenna_azimuth_deg))
+        abs_bearing = np.rad2deg(np.arctan2(dy, dx))
+        rel_az = ((abs_bearing - azimuth + 180) % 360) - 180
+        rel_el = np.rad2deg(np.arctan2(h_ue - ant_height, d2d))
+        PHI_RAD = np.deg2rad(rel_az)
+        THETA_RAD = np.deg2rad(rel_el)
 
-    tx_power_dbm = 10 * np.log10(max(tx_power_w, 1e-6) * 1000)
-    rx_power_dbm = tx_power_dbm + combined_gain - path_loss
+        combined_gain = np.full_like(X, -80.0)
+        beam_owner = np.full(X.shape, 0, dtype=int)
+        beam_counter = 1
 
-    edge_start_m = coverage_radius_m * 0.78
-    edge_norm = np.clip((d2d - edge_start_m) / max(coverage_radius_m - edge_start_m, 1e-6), 0.0, 1.0)
-    edge_taper_db = 18.0 * (edge_norm ** 1.6)
-    rx_power_dbm = rx_power_dbm - edge_taper_db
+        mute_left = int(cell.get("num_dft_beam_mute_left", num_dft_beam_mute_left))
+        mute_right = int(cell.get("num_dft_beam_mute_right", num_dft_beam_mute_right))
+        refinement = bool(cell.get("nr_bts_beam_refinement_p2", nr_bts_beam_refinement_p2))
 
-    lat_grid, lon_grid = meters_to_latlon(dx, dy, antenna_lat, antenna_lon)
+        for row_i, n_beams_in_row in enumerate(rows):
+            el_center = el_centers[row_i]
+            if n_beams_in_row == 1:
+                az_positions = [0.0]
+            else:
+                step = az_opening / n_beams_in_row
+                az_positions = [(-az_half + step / 2) + j * step for j in range(n_beams_in_row)]
+            az_positions = apply_dft_beam_mute(az_positions, mute_left, mute_right)
+
+            active_beams_in_row = max(1, len(az_positions))
+            az_beam_half = (az_opening / active_beams_in_row) / 2 * 1.3
+            el_beam_half = (abs(upper_edge_val - lower_edge_val) / max(n_rows, 1)) / 2 * 1.3 if n_rows > 1 else 12
+
+            for az_center in az_positions:
+                current_beam_id = beam_counter
+                beam_counter += 1
+                if active_beam_ids is not None and current_beam_id not in active_beam_ids:
+                    continue
+
+                for az_ref, el_ref in get_refined_centers(
+                    az_center, el_center, az_beam_half, el_beam_half, refinement
+                ):
+                    phi_s = np.deg2rad(az_ref)
+                    theta_s = np.deg2rad(el_ref)
+                    AF = array_factor_2d(PHI_RAD, THETA_RAD, n_col, n_row, d_h, d_v, k, phi_s, theta_s)
+                    EP = element_pattern_2d(rel_az, rel_el)
+                    gain = 20 * np.log10(np.abs(AF) + 1e-12) + EP
+                    mask = gain > combined_gain
+                    combined_gain = np.where(mask, gain, combined_gain)
+                    beam_owner = np.where(mask, current_beam_id, beam_owner)
+
+        pl_los = 32.4 + 21 * np.log10(d3d) + 20 * np.log10(freq_cell)
+        pl_nlos = 13.54 + 39.08 * np.log10(d3d) + 20 * np.log10(freq_cell) - 0.6 * (h_ue - 1.5)
+        path_loss = np.maximum(pl_los, pl_nlos)
+
+        tx_power_dbm_cell = 10 * np.log10(max(float(cell.get("tx_power_w", tx_power_w)), 1e-6) * 1000)
+        rx_power_cell = tx_power_dbm_cell + combined_gain - path_loss
+
+        edge_start_m = coverage_radius_m * 0.78
+        edge_norm = np.clip((d2d - edge_start_m) / max(coverage_radius_m - edge_start_m, 1e-6), 0.0, 1.0)
+        edge_taper_db = 18.0 * (edge_norm ** 1.6)
+        rx_power_cell = rx_power_cell - edge_taper_db
+
+        better_mask = rx_power_cell > dominant_rx
+        secondary_rx = np.where(better_mask, dominant_rx, secondary_rx)
+        secondary_cell_idx = np.where(better_mask, dominant_cell_idx, secondary_cell_idx)
+        secondary_beam = np.where(better_mask, dominant_beam, secondary_beam)
+
+        second_mask = (~better_mask) & (rx_power_cell > secondary_rx)
+        secondary_rx = np.where(second_mask, rx_power_cell, secondary_rx)
+        secondary_cell_idx = np.where(second_mask, cell_idx, secondary_cell_idx)
+        secondary_beam = np.where(second_mask, beam_owner, secondary_beam)
+
+        dominant_rx = np.where(better_mask, rx_power_cell, dominant_rx)
+        dominant_cell_idx = np.where(better_mask, cell_idx, dominant_cell_idx)
+        dominant_beam = np.where(better_mask, beam_owner, dominant_beam)
+        dominant_d3d = np.where(better_mask, d3d, dominant_d3d)
+
+    lat_grid, lon_grid = meters_to_latlon(X, Y, lat_center, lon_center)
     thr = float(rsrp_threshold_dbm)
     stride = 1 if thr >= -110 else 2
+
     lat_all = lat_grid[::stride, ::stride].ravel()
     lon_all = lon_grid[::stride, ::stride].ravel()
-    rx_all = rx_power_dbm[::stride, ::stride].ravel()
-    beam_all = beam_owner[::stride, ::stride].ravel()
-    dist_all = d2d[::stride, ::stride].ravel()
-    beam_display_all = np.where(beam_all >= 0, beam_all + 1, 0)
+    dom_rx_all = dominant_rx[::stride, ::stride].ravel()
+    dom_cell_idx_all = dominant_cell_idx[::stride, ::stride].ravel()
+    dom_beam_all = dominant_beam[::stride, ::stride].ravel()
+    dom_dist_all = dominant_d3d[::stride, ::stride].ravel()
+    sec_rx_all = secondary_rx[::stride, ::stride].ravel()
+    sec_cell_idx_all = secondary_cell_idx[::stride, ::stride].ravel()
+    sec_beam_all = secondary_beam[::stride, ::stride].ravel()
 
-    show_mask = rx_all >= thr
+    cell_names = [str(c.get("cell_id", f"Cell-{i+1}")) for i, c in enumerate(cell_configs)]
+    dom_cell_name_all = np.array([cell_names[i] if 0 <= i < len(cell_names) else "Unknown" for i in dom_cell_idx_all], dtype=object)
+
+    sec_summary_all = np.array([
+        (
+            f'{cell_names[i]} | Beam {int(sec_beam_all[idx])} | {sec_rx_all[idx]:.1f} dBm'
+            if (0 <= i < len(cell_names) and sec_rx_all[idx] >= thr)
+            else "None above threshold"
+        )
+        for idx, i in enumerate(sec_cell_idx_all)
+    ], dtype=object)
+
+    show_mask = dom_rx_all >= thr
     lat_flat = lat_all[show_mask]
     lon_flat = lon_all[show_mask]
-    rx_flat = rx_all[show_mask]
-    beam_display = beam_display_all[show_mask]
-    dist_flat = dist_all[show_mask]
+    rx_flat = dom_rx_all[show_mask]
+    dom_beam_flat = dom_beam_all[show_mask]
+    dom_cell_flat = dom_cell_name_all[show_mask]
+    sec_summary_flat = sec_summary_all[show_mask]
+    dist_flat = dom_dist_all[show_mask]
 
     edge_delta_db = 1.3
-    edge_mask = np.abs(rx_all - thr) <= edge_delta_db
+    edge_mask = np.abs(dom_rx_all - thr) <= edge_delta_db
     lat_edge = lat_all[edge_mask]
     lon_edge = lon_all[edge_mask]
+
+    near_3d_view = str(map_perspective_mode or "flat-2d") == "near-3d"
+    map_pitch = 76 if near_3d_view else 0
+    map_bearing = (float(antenna_azimuth_deg) + 28.0) % 360 if near_3d_view else 0.0
+    map_zoom = 12.2 if near_3d_view else 10.8
+
+    supported_styles = {
+        "carto-positron",
+        "carto-darkmatter",
+        "open-street-map",
+        "stamen-terrain",
+        "stamen-toner",
+    }
+    map_style = str(map_theme_mode or "carto-positron")
+    if map_style not in supported_styles:
+        map_style = "carto-positron"
+
+    dark_theme = map_style in {"carto-darkmatter", "stamen-toner"}
+    site_color = '#F5F5F5' if dark_theme else '#111111'
+    azimuth_line_color = '#F5F5F5' if dark_theme else '#111111'
 
     fig = go.Figure()
     if len(lat_flat) > 0:
@@ -763,23 +1023,23 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
                 cmin=max(-130, thr),
                 cmax=-60,
                 opacity=0.80,
-                colorbar=dict(
-                    title=dict(text='Estimated RSRP [dBm]')
-                ),
+                colorbar=dict(title=dict(text='Dominant RSRP [dBm]')),
             ),
-            customdata=np.stack([beam_display, rx_flat, dist_flat], axis=1),
+            customdata=np.stack([dom_cell_flat, dom_beam_flat, rx_flat, sec_summary_flat, dist_flat], axis=1),
             hovertemplate=(
                 'Lat: %{lat:.6f}<br>Lon: %{lon:.6f}<br>'
-                'Beam ID: %{customdata[0]:.0f}<br>'
-                'RSRP: %{customdata[1]:.1f} dBm<br>'
-                'Distance to antenna: %{customdata[2]:.0f} m (%{customdata[2]:.2f} km)<extra></extra>'
+                'Dominant Cell: %{customdata[0]}<br>'
+                'Dominant Beam ID: %{customdata[1]:.0f}<br>'
+                'Dominant RSRP: %{customdata[2]:.1f} dBm<br>'
+                'Secondary Coverage: %{customdata[3]}<br>'
+                '3D Distance to dominant cell: %{customdata[4]:.0f} m (%{customdata[4]:.2f} km)<extra></extra>'
             ),
             showlegend=False,
         ))
     else:
         fig.add_trace(go.Scattermapbox(
-            lat=[antenna_lat],
-            lon=[antenna_lon],
+            lat=[lat_center],
+            lon=[lon_center],
             mode='markers',
             marker=dict(size=1, color='rgba(0,0,0,0)'),
             hoverinfo='skip',
@@ -804,47 +1064,523 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
             showlegend=False,
         ))
 
-    fig.add_trace(go.Scattermapbox(
-        lat=[antenna_lat], lon=[antenna_lon],
-        mode='markers+text',
-        marker=dict(size=12, color='#111111'),
-        text=['Antenna'], textposition='top right',
-        hovertemplate='Antenna Site<br>Lat: %{lat:.6f}<br>Lon: %{lon:.6f}<extra></extra>',
-        showlegend=False,
-    ))
+    direction_len = coverage_radius_m * 0.18
+    for cell_idx, cell in enumerate(cell_configs):
+        cell_name = str(cell.get("cell_id", f"Cell-{cell_idx+1}"))
+        lat_site = float(cell.get("lat", lat_center))
+        lon_site = float(cell.get("lon", lon_center))
+        cell_az = float(cell.get("antenna_azimuth_deg", antenna_azimuth_deg))
 
-    direction_len = coverage_radius_m * 0.35
-    dx_dir = direction_len * np.cos(np.deg2rad(antenna_azimuth_deg))
-    dy_dir = direction_len * np.sin(np.deg2rad(antenna_azimuth_deg))
-    lat_dir, lon_dir = meters_to_latlon(np.array([0.0, dx_dir]), np.array([0.0, dy_dir]), antenna_lat, antenna_lon)
-    fig.add_trace(go.Scattermapbox(
-        lat=lat_dir.tolist(), lon=lon_dir.tolist(),
-        mode='lines', line=dict(width=4, color='#111111'),
-        hoverinfo='skip', showlegend=False,
-    ))
+        fig.add_trace(go.Scattermapbox(
+            lat=[lat_site], lon=[lon_site],
+            mode='markers+text',
+            marker=dict(size=11, color=site_color),
+            text=[cell_name], textposition='top right',
+            hovertemplate=(
+                f'{cell_name}<br>Lat: %{{lat:.6f}}<br>Lon: %{{lon:.6f}}<br>'
+                f'Azimuth: {cell_az:.1f}°<extra></extra>'
+            ),
+            showlegend=False,
+        ))
 
+        dx_dir = direction_len * np.cos(np.deg2rad(cell_az))
+        dy_dir = direction_len * np.sin(np.deg2rad(cell_az))
+        lat_dir, lon_dir = meters_to_latlon(
+            np.array([0.0, dx_dir]),
+            np.array([0.0, dy_dir]),
+            lat_site,
+            lon_site,
+        )
+        fig.add_trace(go.Scattermapbox(
+            lat=lat_dir.tolist(), lon=lon_dir.tolist(),
+            mode='lines', line=dict(width=3, color=azimuth_line_color),
+            hoverinfo='skip', showlegend=False,
+        ))
+
+    tx_power_dbm = 10 * np.log10(max(float(tx_power_w), 1e-6) * 1000)
     fig.update_layout(
         template='plotly_white',
         paper_bgcolor='#FFFFFF',
         font=dict(family='Arial', size=12, color='#333333'),
         title=dict(
             text=(
-                '<b>Estimated Ground Coverage (Path Loss + Beam Gain)</b>'
+                '<b>Estimated Cluster Coverage (Dominant Cell Rendering)</b>'
                 f'<br><span style="font-size:11px;color:#666">'
-                f'Tx: {tx_power_w:.0f} W ({tx_power_dbm:.1f} dBm) | '
+                f'Cells: {len(cell_configs)} | Dominant paint, secondary in hover | '
+                f'Base Tx ref: {tx_power_w:.0f} W ({tx_power_dbm:.1f} dBm) | '
                 f'3GPP UMa simplified path loss | f={freq_ghz:.1f} GHz</span>'
             ),
             font=dict(size=14, color='#333')
         ),
         mapbox=dict(
-            style='open-street-map',
-            center=dict(lat=antenna_lat, lon=antenna_lon),
-            zoom=11,
-            pitch=72,
-            bearing=float(antenna_azimuth_deg),
+            style=map_style,
+            center=dict(lat=lat_center, lon=lon_center),
+            zoom=map_zoom,
+            pitch=map_pitch,
+            bearing=map_bearing,
         ),
         height=980,
         margin=dict(l=55, r=20, t=60, b=45),
+    )
+    return fig
+
+
+def build_urban_blocks(seed_value: int, radius_m: float = 1800.0) -> list[dict[str, float]]:
+    rng = np.random.default_rng(seed_value)
+    blocks: list[dict[str, float]] = []
+    attempts = 0
+    target = 26
+    while len(blocks) < target and attempts < 250:
+        attempts += 1
+        cx = float(rng.uniform(-radius_m, radius_m))
+        cy = float(rng.uniform(-radius_m, radius_m))
+        if np.sqrt(cx**2 + cy**2) < 240.0:
+            continue
+        width = float(rng.uniform(90.0, 220.0))
+        depth = float(rng.uniform(90.0, 220.0))
+        height = float(rng.uniform(18.0, 180.0))
+        atten_db = float(rng.uniform(6.0, 18.0))
+        blocks.append({"x": cx, "y": cy, "w": width, "d": depth, "h": height, "atten_db": atten_db})
+    return blocks
+
+
+def build_complete_urban_blocks(seed_value: int, radius_m: float = 3400.0, target: int = 120) -> list[dict[str, float]]:
+    rng = np.random.default_rng(seed_value)
+    blocks: list[dict[str, float]] = []
+    attempts = 0
+    max_attempts = target * 45
+
+    while len(blocks) < target and attempts < max_attempts:
+        attempts += 1
+        cx = float(rng.uniform(-radius_m, radius_m))
+        cy = float(rng.uniform(-radius_m, radius_m))
+        r = float(np.hypot(cx, cy))
+
+        if r > radius_m * 0.98:
+            continue
+
+        # Keep a broad waterfront area to avoid only dense blocks everywhere.
+        if cy < -radius_m * 0.62 and cx < radius_m * 0.55:
+            continue
+
+        center_density = float(np.exp(-(r / (radius_m * 0.75))**2))
+        corridor_density = float(0.25 * np.exp(-((cy + radius_m * 0.28) / (radius_m * 0.25))**2))
+        density = float(np.clip(0.14 + 0.74 * center_density + corridor_density, 0.10, 0.95))
+        if rng.random() > density:
+            continue
+
+        width = float(rng.uniform(65.0, 210.0))
+        depth = float(rng.uniform(65.0, 210.0))
+        h_scale = float(np.clip(0.35 + 0.85 * density + rng.uniform(-0.15, 0.25), 0.22, 1.3))
+        height = float(np.clip(16.0 + 210.0 * h_scale, 14.0, 280.0))
+        atten_db = float(np.clip(5.0 + 16.0 * density, 5.0, 22.0))
+
+        blocks.append({"x": cx, "y": cy, "w": width, "d": depth, "h": height, "atten_db": atten_db})
+
+    return blocks
+
+
+def build_urban_parks(seed_value: int, radius_m: float = 3400.0, target: int = 10) -> list[dict[str, float]]:
+    rng = np.random.default_rng(seed_value)
+    parks: list[dict[str, float]] = []
+    attempts = 0
+
+    while len(parks) < target and attempts < target * 40:
+        attempts += 1
+        cx = float(rng.uniform(-radius_m * 0.9, radius_m * 0.9))
+        cy = float(rng.uniform(-radius_m * 0.9, radius_m * 0.9))
+        if cy < -radius_m * 0.62 and cx < radius_m * 0.55:
+            continue
+        w = float(rng.uniform(160.0, 420.0))
+        d = float(rng.uniform(120.0, 360.0))
+        parks.append({"x": cx, "y": cy, "w": w, "d": d})
+
+    return parks
+
+
+def add_cuboid_trace(fig: go.Figure, cx: float, cy: float, width: float, depth: float, height: float,
+                     color: str = "#B7BDC6", opacity: float = 0.68):
+    x0, x1 = cx - width / 2.0, cx + width / 2.0
+    y0, y1 = cy - depth / 2.0, cy + depth / 2.0
+    z0, z1 = 0.0, height
+
+    x = [x0, x1, x1, x0, x0, x1, x1, x0]
+    y = [y0, y0, y1, y1, y0, y0, y1, y1]
+    z = [z0, z0, z0, z0, z1, z1, z1, z1]
+
+    i = [0, 0, 4, 4, 0, 0, 1, 1, 2, 2, 3, 3]
+    j = [1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 0, 4]
+    k = [2, 3, 6, 7, 5, 4, 6, 5, 7, 6, 4, 7]
+
+    fig.add_trace(go.Mesh3d(
+        x=x, y=y, z=z,
+        i=i, j=j, k=k,
+        color=color,
+        opacity=opacity,
+        flatshading=True,
+        lighting=dict(ambient=0.62, diffuse=0.35, roughness=0.95, specular=0.05),
+        hovertemplate=(
+            f'Building block<br>X: {cx:.0f} m<br>Y: {cy:.0f} m<br>'
+            f'Footprint: {width:.0f}×{depth:.0f} m<br>Height: {height:.0f} m<extra></extra>'
+        ),
+        showlegend=False,
+    ))
+
+
+def generate_3d_urban_base_layer(antenna_height_m=30.0,
+                                 antenna_azimuth_deg=0.0,
+                                 antenna_lat=40.75503684862242,
+                                 antenna_lon=29.94555084488382):
+    seed_value = int((abs(float(antenna_lat)) * 100000 + abs(float(antenna_lon)) * 1000)) % (2**31 - 1)
+    map_radius = 3400.0
+    urban_blocks = build_complete_urban_blocks(seed_value, map_radius, target=120)
+    parks = build_urban_parks(seed_value + 7919, map_radius, target=10)
+
+    fig = go.Figure()
+    ground_size = map_radius + 300.0
+    fig.add_trace(go.Mesh3d(
+        x=[-ground_size, ground_size, ground_size, -ground_size],
+        y=[-ground_size, -ground_size, ground_size, ground_size],
+        z=[0, 0, 0, 0],
+        i=[0, 0], j=[1, 2], k=[2, 3],
+        color='#E9EDF2',
+        opacity=0.96,
+        hovertemplate='Synthetic urban base ground (0 m)<extra></extra>',
+        showlegend=False,
+    ))
+
+    # Waterfront zone (non-satellite visual context)
+    fig.add_trace(go.Mesh3d(
+        x=[-ground_size, ground_size * 0.58, ground_size * 0.58, -ground_size],
+        y=[-ground_size, -ground_size, -ground_size * 0.62, -ground_size * 0.62],
+        z=[0.2, 0.2, 0.2, 0.2],
+        i=[0, 0], j=[1, 2], k=[2, 3],
+        color='#DCEAF8',
+        opacity=0.92,
+        hovertemplate='Water zone<extra></extra>',
+        showlegend=False,
+    ))
+
+    # Park zones
+    for park in parks:
+        x0 = park["x"] - park["w"] / 2.0
+        x1 = park["x"] + park["w"] / 2.0
+        y0 = park["y"] - park["d"] / 2.0
+        y1 = park["y"] + park["d"] / 2.0
+        fig.add_trace(go.Mesh3d(
+            x=[x0, x1, x1, x0],
+            y=[y0, y0, y1, y1],
+            z=[0.7, 0.7, 0.7, 0.7],
+            i=[0, 0], j=[1, 2], k=[2, 3],
+            color='#DDECD8',
+            opacity=0.86,
+            hovertemplate='Park zone<extra></extra>',
+            showlegend=False,
+        ))
+
+    # Major road grid
+    for road in np.arange(-3150, 3151, 450):
+        fig.add_trace(go.Scatter3d(
+            x=[-ground_size * 0.95, ground_size * 0.95], y=[road, road], z=[1.0, 1.0],
+            mode='lines',
+            line=dict(color='#C9D0DA', width=7),
+            hoverinfo='skip',
+            showlegend=False,
+        ))
+        fig.add_trace(go.Scatter3d(
+            x=[road, road], y=[-ground_size * 0.95, ground_size * 0.95], z=[1.0, 1.0],
+            mode='lines',
+            line=dict(color='#C9D0DA', width=7),
+            hoverinfo='skip',
+            showlegend=False,
+        ))
+
+    # Two diagonal arterials for complete-map feel.
+    fig.add_trace(go.Scatter3d(
+        x=[-ground_size * 0.9, ground_size * 0.95],
+        y=[-ground_size * 0.15, ground_size * 0.6],
+        z=[1.2, 1.2],
+        mode='lines',
+        line=dict(color='#BFC7D1', width=9),
+        hoverinfo='skip',
+        showlegend=False,
+    ))
+    fig.add_trace(go.Scatter3d(
+        x=[-ground_size * 0.6, ground_size * 0.8],
+        y=[ground_size * 0.95, -ground_size * 0.35],
+        z=[1.2, 1.2],
+        mode='lines',
+        line=dict(color='#BFC7D1', width=9),
+        hoverinfo='skip',
+        showlegend=False,
+    ))
+
+    for block in urban_blocks:
+        if block["h"] > 210:
+            b_color = '#B5BECB'
+        elif block["h"] > 140:
+            b_color = '#C0C8D3'
+        else:
+            b_color = '#CCD3DC'
+        add_cuboid_trace(fig, block["x"], block["y"], block["w"], block["d"], block["h"], color=b_color, opacity=0.72)
+
+    fig.add_trace(go.Scatter3d(
+        x=[0, 0], y=[0, 0], z=[0, float(antenna_height_m)],
+        mode='lines',
+        line=dict(color='#111111', width=8),
+        hovertemplate=f'Antenna mast<br>Height: {float(antenna_height_m):.1f} m<extra></extra>',
+        showlegend=False,
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=[0], y=[0], z=[float(antenna_height_m)],
+        mode='markers+text',
+        marker=dict(size=7, color='#111111'),
+        text=['Antenna'],
+        textposition='top center',
+        hovertemplate=(
+            'Antenna Site<br>'
+            f'Reference Lat: {float(antenna_lat):.8f}<br>'
+            f'Reference Lon: {float(antenna_lon):.8f}<br>'
+            f'Height: {float(antenna_height_m):.1f} m<extra></extra>'
+        ),
+        showlegend=False,
+    ))
+
+    dir_len = 900.0
+    az_rad = np.deg2rad(float(antenna_azimuth_deg))
+    fig.add_trace(go.Scatter3d(
+        x=[0, dir_len * np.cos(az_rad)],
+        y=[0, dir_len * np.sin(az_rad)],
+        z=[float(antenna_height_m), float(antenna_height_m)],
+        mode='lines+text',
+        line=dict(color='#D32F2F', width=5, dash='dot'),
+        text=['', 'Azimuth'],
+        textposition='top center',
+        hovertemplate='Antenna azimuth reference<extra></extra>',
+        showlegend=False,
+    ))
+
+    fig.update_layout(
+        template='plotly_white',
+        title=dict(
+            text=(
+                '<b>3D Urban Base Layer (Stage 1)</b>'
+                '<br><span style="font-size:11px;color:#666">Complete synthetic city map (non-satellite): '
+                'waterfront, parks, roads, and broad building coverage. Propagation layer will be added next.</span>'
+            ),
+            font=dict(size=14, color='#333')
+        ),
+        scene=dict(
+            xaxis_title='X [m]',
+            yaxis_title='Y [m]',
+            zaxis_title='Height [m]',
+            camera=dict(eye=dict(x=1.94, y=-1.70, z=1.02)),
+            aspectmode='manual',
+            aspectratio=dict(x=1.45, y=1.45, z=0.62),
+            xaxis=dict(backgroundcolor='#F8F9FB', gridcolor='#E3E7ED'),
+            yaxis=dict(backgroundcolor='#F8F9FB', gridcolor='#E3E7ED'),
+            zaxis=dict(backgroundcolor='#F8F9FB', gridcolor='#E3E7ED', range=[0, 320]),
+        ),
+        height=980,
+        margin=dict(l=0, r=0, t=60, b=0),
+    )
+    return fig
+
+
+def generate_3d_coverage_volume(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
+                                tilt_offset, az_opening_override,
+                                upper_edge_angle, lower_edge_angle,
+                                mmimo_ant_array_mode=0,
+                                nr_bts_beam_refinement_p2=False,
+                                num_dft_beam_mute_right=0,
+                                num_dft_beam_mute_left=0,
+                                tx_power_w=320.0,
+                                rsrp_threshold_dbm=-130.0,
+                                antenna_azimuth_deg=0.0,
+                                antenna_height_m=30.0,
+                                active_beam_ids=None,
+                                antenna_lat=40.75503684862242,
+                                antenna_lon=29.94555084488382):
+    bs = BEAM_SET_DEFS[beam_set_key]
+    ru = RU_CONFIGS[ru_type]
+    rows = bs["rows"]
+    n_rows = len(rows)
+    az_opening = az_opening_override if az_opening_override else bs["az_opening"]
+    az_half = az_opening / 2
+
+    c = 3e8
+    freq = freq_ghz * 1e9
+    lam = c / freq
+    k = 2 * np.pi / lam
+    d_h = d_h_lam * lam
+    d_v = d_v_lam * lam
+    n_col, n_row = apply_mmimo_array_mode(ru["n_col"], ru["n_row"], mmimo_ant_array_mode)
+
+    if n_rows == 1:
+        el_centers = [tilt_offset]
+    else:
+        el_span = upper_edge_angle - lower_edge_angle
+        el_centers = [upper_edge_angle - i * el_span / (n_rows - 1) + tilt_offset for i in range(n_rows)]
+
+    x = np.linspace(-2200.0, 2200.0, 34)
+    y = np.linspace(-2200.0, 2200.0, 34)
+    z = np.linspace(1.5, 220.0, 14)
+    X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+
+    d2d = np.sqrt(X**2 + Y**2) + 1e-6
+    d3d = np.sqrt(d2d**2 + (antenna_height_m - Z)**2)
+
+    abs_bearing = np.rad2deg(np.arctan2(Y, X))
+    rel_az = ((abs_bearing - antenna_azimuth_deg + 180) % 360) - 180
+    rel_el = np.rad2deg(np.arctan2(Z - antenna_height_m, d2d))
+    PHI_RAD = np.deg2rad(rel_az)
+    THETA_RAD = np.deg2rad(rel_el)
+
+    combined_gain = np.full_like(X, -80.0)
+    beam_counter = 1
+
+    for row_i, n_beams_in_row in enumerate(rows):
+        el_center = el_centers[row_i]
+        if n_beams_in_row == 1:
+            az_positions = [0.0]
+        else:
+            step = az_opening / n_beams_in_row
+            az_positions = [(-az_half + step / 2) + j * step for j in range(n_beams_in_row)]
+        az_positions = apply_dft_beam_mute(az_positions, num_dft_beam_mute_left, num_dft_beam_mute_right)
+
+        active_beams_in_row = max(1, len(az_positions))
+        az_beam_half = (az_opening / active_beams_in_row) / 2 * 1.3
+        el_beam_half = (abs(upper_edge_angle - lower_edge_angle) / max(n_rows, 1)) / 2 * 1.3 if n_rows > 1 else 12
+
+        for az_center in az_positions:
+            current_beam_id = beam_counter
+            beam_counter += 1
+            if active_beam_ids is not None and current_beam_id not in active_beam_ids:
+                continue
+            for az_ref, el_ref in get_refined_centers(
+                az_center, el_center, az_beam_half, el_beam_half, nr_bts_beam_refinement_p2
+            ):
+                phi_s = np.deg2rad(az_ref)
+                theta_s = np.deg2rad(el_ref)
+                AF = array_factor_2d(PHI_RAD, THETA_RAD, n_col, n_row, d_h, d_v, k, phi_s, theta_s)
+                EP = element_pattern_2d(rel_az, rel_el)
+                gain = 20 * np.log10(np.abs(AF) + 1e-12) + EP
+                combined_gain = np.maximum(combined_gain, gain)
+
+    h_rx = np.maximum(Z, 1.5)
+    pl_los = 32.4 + 21 * np.log10(d3d) + 20 * np.log10(freq_ghz)
+    pl_nlos = 13.54 + 39.08 * np.log10(d3d) + 20 * np.log10(freq_ghz) - 0.6 * (h_rx - 1.5)
+    path_loss = np.maximum(pl_los, pl_nlos)
+
+    tx_power_dbm = 10 * np.log10(max(tx_power_w, 1e-6) * 1000)
+    rx_power_dbm = tx_power_dbm + combined_gain - path_loss
+
+    seed_value = int((abs(float(antenna_lat)) * 100000 + abs(float(antenna_lon)) * 1000)) % (2**31 - 1)
+    urban_blocks = build_urban_blocks(seed_value)
+    for block in urban_blocks:
+        sigma = max(block["w"], block["d"]) * 0.85
+        dxy = np.sqrt((X - block["x"])**2 + (Y - block["y"])**2)
+        near_factor = np.exp(-(dxy**2) / (2 * sigma**2 + 1e-9))
+        z_factor = np.clip((block["h"] + 25.0 - Z) / (block["h"] + 25.0), 0.0, 1.0)
+        rx_power_dbm = rx_power_dbm - block["atten_db"] * near_factor * z_factor
+
+    fig = go.Figure()
+    ground_size = 2400.0
+    fig.add_trace(go.Mesh3d(
+        x=[-ground_size, ground_size, ground_size, -ground_size],
+        y=[-ground_size, -ground_size, ground_size, ground_size],
+        z=[0, 0, 0, 0],
+        i=[0, 0], j=[1, 2], k=[2, 3],
+        color='#E7EBF0',
+        opacity=0.92,
+        hoverinfo='skip',
+        showlegend=False,
+    ))
+
+    for road in np.arange(-2100, 2101, 350):
+        fig.add_trace(go.Scatter3d(
+            x=[-2200, 2200], y=[road, road], z=[1.0, 1.0],
+            mode='lines',
+            line=dict(color='#C8CED8', width=2),
+            hoverinfo='skip',
+            showlegend=False,
+        ))
+        fig.add_trace(go.Scatter3d(
+            x=[road, road], y=[-2200, 2200], z=[1.0, 1.0],
+            mode='lines',
+            line=dict(color='#C8CED8', width=2),
+            hoverinfo='skip',
+            showlegend=False,
+        ))
+
+    for block in urban_blocks:
+        add_cuboid_trace(fig, block["x"], block["y"], block["w"], block["d"], block["h"])
+
+    ground_rsrp = rx_power_dbm[:, :, 0]
+    fig.add_trace(go.Surface(
+        x=X[:, :, 0],
+        y=Y[:, :, 0],
+        z=np.full_like(X[:, :, 0], 2.0),
+        surfacecolor=ground_rsrp,
+        colorscale='Turbo',
+        cmin=max(-130.0, float(rsrp_threshold_dbm) - 8.0),
+        cmax=-60.0,
+        opacity=0.62,
+        showscale=True,
+        colorbar=dict(title=dict(text='Estimated RSRP [dBm]')),
+        hovertemplate='X: %{x:.0f} m<br>Y: %{y:.0f} m<br>Ground RSRP: %{surfacecolor:.1f} dBm<extra></extra>',
+        name='Ground RSRP Layer',
+    ))
+
+    fig.add_trace(go.Isosurface(
+        x=X.ravel(),
+        y=Y.ravel(),
+        z=Z.ravel(),
+        value=rx_power_dbm.ravel(),
+        isomin=float(rsrp_threshold_dbm),
+        isomax=-75,
+        surface_count=4,
+        opacity=0.26,
+        colorscale='Turbo',
+        caps=dict(x_show=False, y_show=False, z_show=False),
+        hovertemplate='X: %{x:.0f} m<br>Y: %{y:.0f} m<br>Z: %{z:.1f} m<br>RSRP: %{value:.1f} dBm<extra></extra>',
+        name='3D Propagation Volume',
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=[0], y=[0], z=[antenna_height_m],
+        mode='markers+text',
+        marker=dict(size=6, color='#111111'),
+        text=['Antenna'],
+        textposition='top center',
+        showlegend=False,
+        hovertemplate=f'Antenna<br>Height: {antenna_height_m:.1f} m<extra></extra>',
+    ))
+
+    fig.update_layout(
+        template='plotly_white',
+        title=dict(
+            text=(
+                '<b>Estimated 3D Urban Propagation (Fast, Non-Satellite)</b>'
+                f'<br><span style="font-size:11px;color:#666">Tx: {tx_power_w:.0f} W ({tx_power_dbm:.1f} dBm) | '
+                f'Iso threshold: {float(rsrp_threshold_dbm):.0f} dBm | Building-aware attenuation proxy enabled</span>'
+            ),
+            font=dict(size=14, color='#333')
+        ),
+        scene=dict(
+            xaxis_title='X [m]',
+            yaxis_title='Y [m]',
+            zaxis_title='Height [m]',
+            camera=dict(eye=dict(x=1.72, y=-1.46, z=0.92)),
+            aspectmode='manual',
+            aspectratio=dict(x=1.35, y=1.35, z=0.58),
+            xaxis=dict(backgroundcolor='#F8F9FB', gridcolor='#E3E7ED'),
+            yaxis=dict(backgroundcolor='#F8F9FB', gridcolor='#E3E7ED'),
+            zaxis=dict(backgroundcolor='#F8F9FB', gridcolor='#E3E7ED', range=[0, 240]),
+        ),
+        height=980,
+        margin=dict(l=0, r=0, t=60, b=0),
     )
     return fig
 
@@ -871,10 +1607,6 @@ controls_card = dbc.Card([
         html.Label("Radio Unit Type", id="label_ru_type", className="fw-bold mt-1", style={"color": "#333", "fontSize": "13px"}),
         dcc.Dropdown(id="ru_type", options=[{"label": k, "value": k} for k in RU_CONFIGS],
                      value="64T64R", clearable=False, className="mb-2"),
-
-        html.Label("Beam Set (basicBeamSet)", id="label_beam_set", className="fw-bold", style={"color": "#333", "fontSize": "13px"}),
-        dcc.Dropdown(id="beam_set", options=[{"label": f'{v["label"]}  ({k})', "value": k} for k, v in BEAM_SET_DEFS.items()],
-                     value="beamSet_3_3_2_square", clearable=False, className="mb-2"),
 
         html.Hr(style={"borderColor": "#DDD"}),
         html.Label("Carrier Frequency (GHz)", id="label_carrier_freq", className="fw-bold", style={"color": "#333", "fontSize": "13px"}),
@@ -977,22 +1709,100 @@ app.layout = dbc.Container([
                             dcc.Graph(id="beam_3d", config={"displayModeBar": True}, style={"height": "48vh"}),
                         ], style={"backgroundColor": "#FFFFFF"})
                     ], className="shadow-sm", style={"border": "1px solid #DEE2E6"}),
-                ], width=6),
+                ], width=8),
                 dbc.Col([
                     dbc.Card([
                         dbc.CardBody([
                             dcc.Graph(id="beam_grid", config={"displayModeBar": False}, style={"height": "48vh"}),
                         ], style={"backgroundColor": "#FFFFFF"})
                     ], className="shadow-sm", style={"border": "1px solid #DEE2E6"}),
-                ], width=6),
+                ], width=4),
             ], className="mb-3"),
             dbc.Card([
                 dbc.CardBody([
-                    html.Label("RSRP Visibility Threshold (dBm)", className="fw-bold", style={"color": "#333", "fontSize": "13px"}),
-                    dcc.Slider(id="rsrp_threshold_dbm", min=-156, max=-55, step=1, value=-130,
-                               marks={-156: "-156", -140: "-140", -130: "-130", -110: "-110", -90: "-90", -70: "-70", -55: "-55"},
-                               tooltip={"placement": "bottom"}),
-                    dcc.Graph(id="beam_heatmap", config={"displayModeBar": True, "scrollZoom": True}, style={"height": "86vh"}),
+                    dbc.Row([
+                        dbc.Col([
+                            html.Label("Beam Set (basicBeamSet)", id="label_beam_set", className="fw-bold", style={"color": "#333", "fontSize": "13px"}),
+                            dcc.Dropdown(id="beam_set", options=[{"label": f'{v["label"]}  ({k})', "value": k} for k, v in BEAM_SET_DEFS.items()],
+                                         value="beamSet_6", clearable=False, className="mb-2"),
+                        ], width=4),
+                        dbc.Col([
+                            html.Label("RSRP Visibility Threshold (dBm)", className="fw-bold", style={"color": "#333", "fontSize": "13px"}),
+                            dcc.Slider(id="rsrp_threshold_dbm", min=-156, max=-55, step=1, value=-110,
+                                       marks={-156: "-156", -140: "-140", -130: "-130", -110: "-110", -90: "-90", -70: "-70", -55: "-55"},
+                                       tooltip={"placement": "bottom"}),
+                        ], width=8),
+                    ], className="align-items-end mb-1"),
+                    html.Label("Cluster Cells (CSV Upload)", className="fw-bold mt-2", style={"color": "#333", "fontSize": "13px"}),
+                    dcc.Upload(
+                        id="cluster_cells_upload",
+                        children=html.Div([
+                            "Drag and drop CSV or ",
+                            html.A("select file", style={"fontWeight": "bold"}),
+                        ]),
+                        style={
+                            "width": "100%",
+                            "height": "42px",
+                            "lineHeight": "42px",
+                            "borderWidth": "1px",
+                            "borderStyle": "dashed",
+                            "borderRadius": "6px",
+                            "textAlign": "center",
+                            "marginBottom": "6px",
+                            "backgroundColor": "#FAFAFA",
+                        },
+                        multiple=False,
+                    ),
+                    html.Div([
+                        html.A("Download cluster template CSV", href="/assets/cluster_cells_template.csv", target="_blank"),
+                    ], className="mb-2", style={"fontSize": "12px"}),
+                    html.Label("Manual Cells (one row per cell: cell_id,lat,lon,azimuth_deg,beam_set)", className="fw-bold", style={"color": "#333", "fontSize": "12px"}),
+                    dcc.Textarea(
+                        id="cluster_cells_manual",
+                        placeholder="Cell-A,40.75503,29.94555,30,beamSet_6\nCell-B,40.76503,29.95555,210,beamSet_2_2",
+                        style={"width": "100%", "height": "74px", "fontSize": "12px"},
+                        className="mb-2",
+                    ),
+                    html.Label("Coverage View", className="fw-bold mt-2", style={"color": "#333", "fontSize": "13px"}),
+                    dcc.RadioItems(
+                        id="coverage_view_mode",
+                        options=[
+                            {"label": "2D Map (Current)", "value": "map-2d"},
+                            {"label": "3D Urban Base Layer (Stage 1)", "value": "urban-3d"},
+                        ],
+                        value="map-2d",
+                        inline=True,
+                        className="mb-2",
+                    ),
+                    html.Label("Map Perspective", className="fw-bold", style={"color": "#333", "fontSize": "13px"}),
+                    dcc.RadioItems(
+                        id="map_perspective_mode",
+                        options=[
+                            {"label": "Flat 2D", "value": "flat-2d"},
+                            {"label": "Near 3D", "value": "near-3d"},
+                        ],
+                        value="flat-2d",
+                        inline=True,
+                        className="mb-2",
+                    ),
+                    html.Label("Map Theme", className="fw-bold", style={"color": "#333", "fontSize": "13px"}),
+                    dcc.Dropdown(
+                        id="map_theme_mode",
+                        options=[
+                            {"label": "Carto Positron (Light)", "value": "carto-positron"},
+                            {"label": "OpenStreetMap (Standard)", "value": "open-street-map"},
+                            {"label": "Stamen Terrain", "value": "stamen-terrain"},
+                            {"label": "Carto DarkMatter", "value": "carto-darkmatter"},
+                            {"label": "Stamen Toner", "value": "stamen-toner"},
+                        ],
+                        value="carto-positron",
+                        clearable=False,
+                        className="mb-2",
+                    ),
+                    dcc.Loading(
+                        type="circle",
+                        children=dcc.Graph(id="beam_heatmap", config={"displayModeBar": True, "scrollZoom": True}, style={"height": "86vh"}),
+                    ),
                 ], style={"backgroundColor": "#FFFFFF"})
             ], className="shadow-sm", style={"border": "1px solid #DEE2E6"}),
         ], width=9, className="ps-1"),
@@ -1106,6 +1916,12 @@ def sync_active_beams_from_legend(restyle_data, beam_figure, current_store):
     Input("antenna_height", "value"),
     Input("tx_power_w", "value"),
     Input("rsrp_threshold_dbm", "value"),
+    Input("cluster_cells_upload", "contents"),
+    Input("cluster_cells_upload", "filename"),
+    Input("cluster_cells_manual", "value"),
+    Input("coverage_view_mode", "value"),
+    Input("map_perspective_mode", "value"),
+    Input("map_theme_mode", "value"),
     Input("antenna_coord", "value"),
     Input("antenna_azimuth_deg", "value"),
     Input("active_beams_store", "data"),
@@ -1116,7 +1932,8 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
                nr_bts_beam_refinement_p2, mmimo_ant_array_mode,
                num_dft_beam_mute_right,
                num_dft_beam_mute_left, antenna_height,
-               tx_power_w, rsrp_threshold_dbm, antenna_coord, antenna_azimuth_deg, active_beams_store,
+               tx_power_w, rsrp_threshold_dbm, cluster_cells_upload, cluster_cells_filename, cluster_cells_manual,
+               coverage_view_mode, map_perspective_mode, map_theme_mode, antenna_coord, antenna_azimuth_deg, active_beams_store,
                prev_params_store):
 
     lobe_scale = 1.0
@@ -1124,6 +1941,33 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
     n_pts = 50
     antenna_lat, antenna_lon = parse_lat_lon(antenna_coord)
     active_beam_ids = set(active_beams_store.get("active_beams", [])) if isinstance(active_beams_store, dict) and active_beams_store.get("active_beams") else None
+
+    cluster_defaults = {
+        "lat": float(antenna_lat),
+        "lon": float(antenna_lon),
+        "antenna_azimuth_deg": float(antenna_azimuth_deg or 0),
+        "beam_set": beam_set,
+        "ru_type": ru_type,
+        "freq_ghz": float(freq_ghz),
+        "d_h_lam": float(d_h_lam),
+        "d_v_lam": float(d_v_lam),
+        "tilt_offset": float(tilt_offset),
+        "upper_edge": float(upper_edge),
+        "lower_edge": float(lower_edge),
+        "left_edge": float(left_edge),
+        "right_edge": float(right_edge),
+        "nr_bts_beam_refinement_p2": bool(nr_bts_beam_refinement_p2),
+        "mmimo_ant_array_mode": int(mmimo_ant_array_mode),
+        "num_dft_beam_mute_right": int(num_dft_beam_mute_right),
+        "num_dft_beam_mute_left": int(num_dft_beam_mute_left),
+        "antenna_height": float(antenna_height),
+        "tx_power_w": float(tx_power_w),
+    }
+
+    base_cluster_cell = normalize_cell_record({"cell_id": "Cell-1"}, cluster_defaults, 1)
+    uploaded_cells, uploaded_parse_msg = parse_uploaded_cells(cluster_cells_upload, cluster_defaults)
+    manual_cells, manual_parse_msg = parse_manual_cells(cluster_cells_manual, cluster_defaults)
+    cluster_cell_list = [base_cluster_cell] + uploaded_cells + manual_cells
 
     current_params = {
         "vendor": vendor,
@@ -1144,6 +1988,10 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
         "antenna_height": antenna_height,
         "tx_power_w": tx_power_w,
         "rsrp_threshold_dbm": rsrp_threshold_dbm,
+        "map_perspective_mode": map_perspective_mode,
+        "map_theme_mode": map_theme_mode,
+        "cluster_cells_filename": cluster_cells_filename,
+        "cluster_cells_count": len(cluster_cell_list),
         "antenna_coord": antenna_coord,
         "antenna_lat": antenna_lat,
         "antenna_lon": antenna_lon,
@@ -1226,22 +2074,33 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
         beam_set, num_dft_beam_mute_right, num_dft_beam_mute_left
     )
 
-    fig_heatmap = generate_az_el_heatmap(
-        beam_set, ru_type, freq_ghz, d_h_lam, d_v_lam,
-        tilt_offset, az_op,
-        upper_edge, lower_edge,
-        mmimo_ant_array_mode,
-        nr_bts_beam_refinement_p2,
-        num_dft_beam_mute_right,
-        num_dft_beam_mute_left,
-        float(tx_power_w or 0),
-        float(rsrp_threshold_dbm or -130),
-        float(antenna_lat),
-        float(antenna_lon),
-        float(antenna_azimuth_deg or 0),
-        float(antenna_height or 0),
-        active_beam_ids,
-    )
+    if coverage_view_mode == "urban-3d":
+        fig_heatmap = generate_3d_urban_base_layer(
+            float(antenna_height or 0),
+            float(antenna_azimuth_deg or 0),
+            float(antenna_lat),
+            float(antenna_lon),
+        )
+    else:
+        fig_heatmap = generate_az_el_heatmap(
+            beam_set, ru_type, freq_ghz, d_h_lam, d_v_lam,
+            tilt_offset, az_op,
+            upper_edge, lower_edge,
+            mmimo_ant_array_mode,
+            nr_bts_beam_refinement_p2,
+            num_dft_beam_mute_right,
+            num_dft_beam_mute_left,
+            float(tx_power_w or 0),
+            float(rsrp_threshold_dbm or -130),
+            float(antenna_lat),
+            float(antenna_lon),
+            float(antenna_azimuth_deg or 0),
+            float(antenna_height or 0),
+            active_beam_ids,
+            map_perspective_mode,
+            map_theme_mode,
+            cluster_cell_list,
+        )
 
     c = 3e8
     lam = c / (freq_ghz * 1e9)
@@ -1255,11 +2114,29 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
     terms = get_terms(vendor)
     changed_control = callback_context.triggered[0]["prop_id"].split(".")[0] if callback_context.triggered else "none"
     ghost_status = "ON" if ghost_available else "Waiting for first parameter change"
+    if coverage_view_mode == "urban-3d":
+        coverage_view_label = "3D Urban Base Layer (Stage 1)"
+    else:
+        perspective_label = "Near 3D" if str(map_perspective_mode or "flat-2d") == "near-3d" else "Flat 2D"
+        coverage_view_label = f"2D Map ({perspective_label}, {map_theme_mode})"
+    upload_source_label = str(cluster_cells_filename) if cluster_cells_filename else "No file"
+    cluster_status_parts = [f"Cells in map: {len(cluster_cell_list)}"]
+    if uploaded_parse_msg:
+        cluster_status_parts.append(uploaded_parse_msg)
+    if manual_parse_msg:
+        cluster_status_parts.append(manual_parse_msg)
+    cluster_status = " | ".join(cluster_status_parts)
 
     info = html.Div([
         html.Table([
             html.Tr([html.Td("Comparison Mode", style=td_label_style),
                      html.Td(f"Ghost overlay: {ghost_status}", style=td_value_style)]),
+            html.Tr([html.Td("Coverage View", style=td_label_style),
+                     html.Td(coverage_view_label, style=td_value_style)]),
+            html.Tr([html.Td("Cluster File", style=td_label_style),
+                     html.Td(upload_source_label, style=td_value_style)]),
+            html.Tr([html.Td("Cluster Status", style=td_label_style),
+                     html.Td(cluster_status, style=td_value_style)]),
             html.Tr([html.Td("Last Changed Control", style=td_label_style),
                      html.Td(changed_control, style=td_value_style)]),
             html.Tr([html.Td(terms["info_vendor"], style=td_label_style),
