@@ -48,6 +48,14 @@ RU_CONFIGS = {
 
 VENDOR_OPTIONS = ["Nokia", "Huawei", "ZTE"]
 
+# Nokia scenario calibration (100 MHz / 273 PRB basis used for coverage)
+NOKIA_PMAX_273_DBM = {
+    "8T8R": 45.3,
+    "32T32R": 39.3,
+    "64T64R": 36.3,
+}
+NOKIA_SSB_SIGNAL_TO_UE_DBM = 18.0
+
 TERMINOLOGY = {
     "Nokia": {
         "controls_title": "⚙️ Nokia Beam Management Parameters",
@@ -359,6 +367,13 @@ def beam_shaded_color(base_hex: str, power_dbm: float,
     gg = int(g + (255 - g) * whiten)
     bb = int(b + (255 - b) * whiten)
     return f'rgb({rr},{gg},{bb})'
+
+
+def get_effective_coverage_tx_power_dbm(vendor: str, ru_type: str, tx_power_w: float) -> tuple[float, str]:
+    if str(vendor) == "Nokia" and ru_type in NOKIA_PMAX_273_DBM:
+        return float(NOKIA_PMAX_273_DBM[ru_type]), "nokia-pmax-273"
+    tx_dbm = 10 * np.log10(max(float(tx_power_w), 1e-6) * 1000)
+    return float(tx_dbm), "generic-tx-power"
 
 # --- DISTINCT BEAM COLOR PALETTE (high contrast on white) ---
 BEAM_COLORS = [
@@ -775,7 +790,8 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
                             active_beam_ids=None,
                             map_perspective_mode="flat-2d",
                             map_theme_mode="carto-positron",
-                            cluster_cells=None):
+                            cluster_cells=None,
+                            vendor="Nokia"):
     base_cell = {
         "cell_id": "Cell-1",
         "lat": float(antenna_lat),
@@ -829,6 +845,7 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
 
     c = 3e8
     h_ue = 1.5
+    tx_source_label = "generic-tx-power"
 
     for cell_idx, cell in enumerate(cell_configs):
         bs_key = cell.get("beam_set", beam_set_key)
@@ -927,7 +944,11 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
         pl_nlos = 13.54 + 39.08 * np.log10(d3d) + 20 * np.log10(freq_cell) - 0.6 * (h_ue - 1.5)
         path_loss = np.maximum(pl_los, pl_nlos)
 
-        tx_power_dbm_cell = 10 * np.log10(max(float(cell.get("tx_power_w", tx_power_w)), 1e-6) * 1000)
+        tx_power_dbm_cell, tx_source_label = get_effective_coverage_tx_power_dbm(
+            vendor,
+            str(cell.get("ru_type", ru_type)),
+            float(cell.get("tx_power_w", tx_power_w)),
+        )
         rx_power_cell = tx_power_dbm_cell + combined_gain - path_loss
 
         edge_start_m = coverage_radius_m * 0.78
@@ -1064,7 +1085,7 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
             showlegend=False,
         ))
 
-    direction_len = coverage_radius_m * 0.18
+    direction_len = float(np.clip(coverage_radius_m * 0.06, 120.0, 650.0))
     for cell_idx, cell in enumerate(cell_configs):
         cell_name = str(cell.get("cell_id", f"Cell-{cell_idx+1}"))
         lat_site = float(cell.get("lat", lat_center))
@@ -1093,11 +1114,18 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
         )
         fig.add_trace(go.Scattermapbox(
             lat=lat_dir.tolist(), lon=lon_dir.tolist(),
-            mode='lines', line=dict(width=3, color=azimuth_line_color),
+            mode='lines', line=dict(width=2, color=azimuth_line_color),
             hoverinfo='skip', showlegend=False,
         ))
 
-    tx_power_dbm = 10 * np.log10(max(float(tx_power_w), 1e-6) * 1000)
+    tx_power_dbm, _ = get_effective_coverage_tx_power_dbm(vendor, ru_type, float(tx_power_w))
+    power_note = (
+        f'Nokia pMAX calibrated (273 PRB): 8T8R={NOKIA_PMAX_273_DBM["8T8R"]:.1f}, '
+        f'32T32R={NOKIA_PMAX_273_DBM["32T32R"]:.1f}, 64T64R={NOKIA_PMAX_273_DBM["64T64R"]:.1f} dBm; '
+        f'SSB signal-to-UE ref={NOKIA_SSB_SIGNAL_TO_UE_DBM:.0f} dBm'
+        if str(vendor) == "Nokia"
+        else f'Generic tx conversion from RU power (source: {tx_source_label})'
+    )
     fig.update_layout(
         template='plotly_white',
         paper_bgcolor='#FFFFFF',
@@ -1107,8 +1135,8 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
                 '<b>Estimated Cluster Coverage (Dominant Cell Rendering)</b>'
                 f'<br><span style="font-size:11px;color:#666">'
                 f'Cells: {len(cell_configs)} | Dominant paint, secondary in hover | '
-                f'Base Tx ref: {tx_power_w:.0f} W ({tx_power_dbm:.1f} dBm) | '
-                f'3GPP UMa simplified path loss | f={freq_ghz:.1f} GHz</span>'
+                f'Coverage Tx ref: {tx_power_dbm:.1f} dBm | '
+                f'3GPP UMa simplified path loss | f={freq_ghz:.1f} GHz | {power_note}</span>'
             ),
             font=dict(size=14, color='#333')
         ),
@@ -1967,7 +1995,14 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
     base_cluster_cell = normalize_cell_record({"cell_id": "Cell-1"}, cluster_defaults, 1)
     uploaded_cells, uploaded_parse_msg = parse_uploaded_cells(cluster_cells_upload, cluster_defaults)
     manual_cells, manual_parse_msg = parse_manual_cells(cluster_cells_manual, cluster_defaults)
-    cluster_cell_list = [base_cluster_cell] + uploaded_cells + manual_cells
+    if uploaded_cells:
+        cluster_cell_list = uploaded_cells
+        if manual_cells:
+            manual_parse_msg = "Manual cells ignored because uploaded file is active."
+    elif manual_cells:
+        cluster_cell_list = manual_cells
+    else:
+        cluster_cell_list = [base_cluster_cell]
 
     current_params = {
         "vendor": vendor,
@@ -2100,6 +2135,7 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
             map_perspective_mode,
             map_theme_mode,
             cluster_cell_list,
+            vendor,
         )
 
     c = 3e8
