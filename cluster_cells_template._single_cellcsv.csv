@@ -1,0 +1,2 @@
+cell_id,lat,lon,antenna_azimuth_deg,beam_set,ru_type,freq_ghz,d_h_lam,d_v_lam,tilt_offset,upper_edge,lower_edge,left_edge,right_edge,nr_bts_beam_refinement_p2,mmimo_ant_array_mode,num_dft_beam_mute_right,num_dft_beam_mute_left,antenna_height,tx_power_w
+CAN1466A,39.9113,32.8488,130,beamSet_6,64T64R,3.5,0.5,0.7,2,8,-4,45,45,FALSE,0,0,0,30,320

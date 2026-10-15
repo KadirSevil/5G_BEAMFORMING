@@ -790,6 +790,7 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
                             active_beam_ids=None,
                             map_perspective_mode="flat-2d",
                             map_theme_mode="carto-positron",
+                            coverage_resolution_scale=1.0,
                             cluster_cells=None,
                             vendor="Nokia"):
     base_cell = {
@@ -828,7 +829,11 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
 
     max_site_dist = max(np.hypot(sx, sy) for sx, sy in site_xy) if site_xy else 0.0
     coverage_radius_m = float(min(26000.0, max(8000.0, max_site_dist + 8000.0)))
-    grid_n = 151 if coverage_radius_m <= 13000 else (131 if coverage_radius_m <= 19000 else 111)
+    base_grid_n = 151 if coverage_radius_m <= 13000 else (131 if coverage_radius_m <= 19000 else 111)
+    res_scale = float(np.clip(float(coverage_resolution_scale or 1.0), 0.60, 2.20))
+    grid_n = int(np.clip(round(base_grid_n * res_scale), 81, 251))
+    if grid_n % 2 == 0:
+        grid_n += 1
 
     x_local = np.linspace(-coverage_radius_m, coverage_radius_m, grid_n)
     y_local = np.linspace(-coverage_radius_m, coverage_radius_m, grid_n)
@@ -973,7 +978,8 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
 
     lat_grid, lon_grid = meters_to_latlon(X, Y, lat_center, lon_center)
     thr = float(rsrp_threshold_dbm)
-    stride = 1 if thr >= -110 else 2
+    base_stride = 1 if thr >= -110 else 2
+    stride = int(np.clip(round(base_stride / res_scale), 1, 4))
 
     lat_all = lat_grid[::stride, ::stride].ravel()
     lon_all = lon_grid[::stride, ::stride].ravel()
@@ -1720,6 +1726,7 @@ info_card = dbc.Card([
 app.layout = dbc.Container([
     dcc.Store(id="prev_params_store"),
     dcc.Store(id="active_beams_store"),
+    dcc.Store(id="cluster_cells_store"),
     dbc.Row([
         dbc.Col([
             html.H2("📡 Nokia 5G NR Beamforming 3D Simulator", id="app_title", className="text-center my-3", style={"color": "#1565C0", "fontWeight": "bold"}),
@@ -1742,6 +1749,16 @@ app.layout = dbc.Container([
                     dbc.Card([
                         dbc.CardBody([
                             dcc.Graph(id="beam_grid", config={"displayModeBar": False}, style={"height": "48vh"}),
+                    html.Label("Coverage Resolution", className="fw-bold", style={"color": "#333", "fontSize": "12px"}),
+                    dcc.Slider(
+                        id="coverage_resolution_pct",
+                        min=60,
+                        max=220,
+                        step=10,
+                        value=100,
+                        marks={60: "60%", 100: "100%", 140: "140%", 180: "180%", 220: "220%"},
+                        tooltip={"placement": "bottom"},
+                    ),
                         ], style={"backgroundColor": "#FFFFFF"})
                     ], className="shadow-sm", style={"border": "1px solid #DEE2E6"}),
                 ], width=4),
@@ -1789,6 +1806,17 @@ app.layout = dbc.Container([
                         id="cluster_cells_manual",
                         placeholder="Cell-A,40.75503,29.94555,30,beamSet_6\nCell-B,40.76503,29.95555,210,beamSet_2_2",
                         style={"width": "100%", "height": "74px", "fontSize": "12px"},
+                        className="mb-2",
+                    ),
+                    html.Label("Cluster Input Mode", className="fw-bold", style={"color": "#333", "fontSize": "12px"}),
+                    dcc.RadioItems(
+                        id="cluster_input_mode",
+                        options=[
+                            {"label": "Scratch (overwrite)", "value": "scratch"},
+                            {"label": "Append (add to existing)", "value": "append"},
+                        ],
+                        value="scratch",
+                        inline=True,
                         className="mb-2",
                     ),
                     html.Label("Coverage View", className="fw-bold mt-2", style={"color": "#333", "fontSize": "13px"}),
@@ -1926,6 +1954,7 @@ def sync_active_beams_from_legend(restyle_data, beam_figure, current_store):
     Output("beam_heatmap", "figure"),
     Output("info_panel", "children"),
     Output("prev_params_store", "data"),
+    Output("cluster_cells_store", "data"),
     Input("vendor", "value"),
     Input("ru_type", "value"),
     Input("beam_set", "value"),
@@ -1944,15 +1973,18 @@ def sync_active_beams_from_legend(restyle_data, beam_figure, current_store):
     Input("antenna_height", "value"),
     Input("tx_power_w", "value"),
     Input("rsrp_threshold_dbm", "value"),
+    Input("coverage_resolution_pct", "value"),
     Input("cluster_cells_upload", "contents"),
     Input("cluster_cells_upload", "filename"),
     Input("cluster_cells_manual", "value"),
+    Input("cluster_input_mode", "value"),
     Input("coverage_view_mode", "value"),
     Input("map_perspective_mode", "value"),
     Input("map_theme_mode", "value"),
     Input("antenna_coord", "value"),
     Input("antenna_azimuth_deg", "value"),
     Input("active_beams_store", "data"),
+    State("cluster_cells_store", "data"),
     State("prev_params_store", "data"),
 )
 def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
@@ -1960,13 +1992,18 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
                nr_bts_beam_refinement_p2, mmimo_ant_array_mode,
                num_dft_beam_mute_right,
                num_dft_beam_mute_left, antenna_height,
-               tx_power_w, rsrp_threshold_dbm, cluster_cells_upload, cluster_cells_filename, cluster_cells_manual,
-               coverage_view_mode, map_perspective_mode, map_theme_mode, antenna_coord, antenna_azimuth_deg, active_beams_store,
+               tx_power_w, rsrp_threshold_dbm, coverage_resolution_pct,
+               cluster_cells_upload, cluster_cells_filename, cluster_cells_manual,
+               cluster_input_mode, coverage_view_mode, map_perspective_mode, map_theme_mode,
+               antenna_coord, antenna_azimuth_deg, active_beams_store, cluster_cells_store,
                prev_params_store):
 
     lobe_scale = 1.0
     gain_threshold = 6
     n_pts = 50
+    triggered_control = callback_context.triggered[0]["prop_id"].split(".")[0] if callback_context.triggered else "none"
+    coverage_res_pct = int(np.clip(int(float(coverage_resolution_pct or 100)), 60, 220))
+    coverage_res_scale = coverage_res_pct / 100.0
     antenna_lat, antenna_lon = parse_lat_lon(antenna_coord)
     active_beam_ids = set(active_beams_store.get("active_beams", [])) if isinstance(active_beams_store, dict) and active_beams_store.get("active_beams") else None
 
@@ -1995,11 +2032,29 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
     base_cluster_cell = normalize_cell_record({"cell_id": "Cell-1"}, cluster_defaults, 1)
     uploaded_cells, uploaded_parse_msg = parse_uploaded_cells(cluster_cells_upload, cluster_defaults)
     manual_cells, manual_parse_msg = parse_manual_cells(cluster_cells_manual, cluster_defaults)
-    if uploaded_cells:
+    mode_value = str(cluster_input_mode or "scratch")
+    existing_cells = cluster_cells_store if isinstance(cluster_cells_store, list) else []
+    source_action = "none"
+
+    if triggered_control == "cluster_cells_upload":
+        source_action = "upload"
+        if mode_value == "append":
+            cluster_cell_list = existing_cells + uploaded_cells if uploaded_cells else existing_cells
+        else:
+            cluster_cell_list = uploaded_cells if uploaded_cells else [base_cluster_cell]
+    elif triggered_control == "cluster_cells_manual":
+        source_action = "manual"
+        if mode_value == "append":
+            cluster_cell_list = existing_cells + manual_cells if manual_cells else existing_cells
+        else:
+            cluster_cell_list = manual_cells if manual_cells else [base_cluster_cell]
+    elif existing_cells:
+        cluster_cell_list = existing_cells
+    elif uploaded_cells:
+        source_action = "upload-init"
         cluster_cell_list = uploaded_cells
-        if manual_cells:
-            manual_parse_msg = "Manual cells ignored because uploaded file is active."
     elif manual_cells:
+        source_action = "manual-init"
         cluster_cell_list = manual_cells
     else:
         cluster_cell_list = [base_cluster_cell]
@@ -2023,6 +2078,8 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
         "antenna_height": antenna_height,
         "tx_power_w": tx_power_w,
         "rsrp_threshold_dbm": rsrp_threshold_dbm,
+        "coverage_resolution_pct": coverage_res_pct,
+        "cluster_input_mode": mode_value,
         "map_perspective_mode": map_perspective_mode,
         "map_theme_mode": map_theme_mode,
         "cluster_cells_filename": cluster_cells_filename,
@@ -2134,6 +2191,7 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
             active_beam_ids,
             map_perspective_mode,
             map_theme_mode,
+            coverage_res_scale,
             cluster_cell_list,
             vendor,
         )
@@ -2148,7 +2206,7 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
     td_label_style = {"padding": "3px 10px 3px 0", "color": "#555", "fontWeight": "normal"}
     td_value_style = {"padding": "3px 0", "fontWeight": "bold", "color": "#1a1a1a"}
     terms = get_terms(vendor)
-    changed_control = callback_context.triggered[0]["prop_id"].split(".")[0] if callback_context.triggered else "none"
+    changed_control = triggered_control
     ghost_status = "ON" if ghost_available else "Waiting for first parameter change"
     if coverage_view_mode == "urban-3d":
         coverage_view_label = "3D Urban Base Layer (Stage 1)"
@@ -2157,6 +2215,9 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
         coverage_view_label = f"2D Map ({perspective_label}, {map_theme_mode})"
     upload_source_label = str(cluster_cells_filename) if cluster_cells_filename else "No file"
     cluster_status_parts = [f"Cells in map: {len(cluster_cell_list)}"]
+    cluster_status_parts.append(f"Resolution: {coverage_res_pct}%")
+    cluster_status_parts.append(f"Mode: {mode_value}")
+    cluster_status_parts.append(f"Last cluster action: {source_action}")
     if uploaded_parse_msg:
         cluster_status_parts.append(uploaded_parse_msg)
     if manual_parse_msg:
@@ -2225,8 +2286,8 @@ def update_all(vendor, ru_type, beam_set, freq_ghz, d_h_lam, d_v_lam,
         ], style={"width": "100%", "borderCollapse": "collapse"}),
     ])
 
-    return fig_3d, fig_grid, fig_heatmap, info, {"last_params": current_params}
+    return fig_3d, fig_grid, fig_heatmap, info, {"last_params": current_params}, cluster_cell_list
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8051)
+    app.run(host="0.0.0.0", port=8071, debug=False, ssl_context="adhoc", use_reloader=False)
