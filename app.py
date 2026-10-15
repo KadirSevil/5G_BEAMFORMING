@@ -1017,29 +1017,41 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
     lat_edge = lat_all[edge_mask]
     lon_edge = lon_all[edge_mask]
 
-    near_3d_view = str(map_perspective_mode or "flat-2d") == "near-3d"
-    map_pitch = 76 if near_3d_view else 0
-    map_bearing = (float(antenna_azimuth_deg) + 28.0) % 360 if near_3d_view else 0.0
-    map_zoom = 12.2 if near_3d_view else 10.8
+    # NOTE: Mapbox-style traces (Scattermapbox) require a Mapbox access token.
+    # The original app shipped with scattermapbox and the styles below
+    # (carto-positron, stamen-*, carto-darkmatter) but had no MAPBOX token,
+    # so the map tiles silently failed to render.  We now use Plotly's
+    # non-Mapbox `Scattermap` traces which consume the `open-street-map`
+    # style directly from openstreetmap.org — no token needed.
+    #
+    # Trade-off: `scattermap` does NOT support `pitch` / `bearing` /
+    # near-3D view, so we always render flat 2D regardless of the
+    # `map_perspective_mode` dropdown value.  The "Near 3D" option is
+    # still visible in the UI for backward compatibility but is now a
+    # no-op (see dropdown hint below).
+    map_zoom = 10.8
 
     supported_styles = {
-        "carto-positron",
-        "carto-darkmatter",
+        # Only tile providers that don't require a Mapbox token are kept.
+        # `carto-positron`, `carto-darkmatter`, `stamen-terrain`, and
+        # `stamen-toner` all served via Mapbox and need a token; they are
+        # intentionally dropped.  Users who want a dark theme can rely on
+        # Plotly's default OSM tiles.
         "open-street-map",
-        "stamen-terrain",
-        "stamen-toner",
+        "white-bg",
+        "carto-positron-nolabels",
     }
-    map_style = str(map_theme_mode or "carto-positron")
+    map_style = str(map_theme_mode or "open-street-map")
     if map_style not in supported_styles:
-        map_style = "carto-positron"
+        map_style = "open-street-map"
 
-    dark_theme = map_style in {"carto-darkmatter", "stamen-toner"}
-    site_color = '#F5F5F5' if dark_theme else '#111111'
-    azimuth_line_color = '#F5F5F5' if dark_theme else '#111111'
+    dark_theme = False  # all token-free styles are light/neutral
+    site_color = '#111111'
+    azimuth_line_color = '#111111'
 
     fig = go.Figure()
     if len(lat_flat) > 0:
-        fig.add_trace(go.Scattermapbox(
+        fig.add_trace(go.Scattermap(
             lat=lat_flat,
             lon=lon_flat,
             mode='markers',
@@ -1064,7 +1076,7 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
             showlegend=False,
         ))
     else:
-        fig.add_trace(go.Scattermapbox(
+        fig.add_trace(go.Scattermap(
             lat=[lat_center],
             lon=[lon_center],
             mode='markers',
@@ -1074,7 +1086,7 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
         ))
 
     if len(lat_edge) > 0:
-        fig.add_trace(go.Scattermapbox(
+        fig.add_trace(go.Scattermap(
             lat=lat_edge,
             lon=lon_edge,
             mode='markers',
@@ -1082,7 +1094,7 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
             hoverinfo='skip',
             showlegend=False,
         ))
-        fig.add_trace(go.Scattermapbox(
+        fig.add_trace(go.Scattermap(
             lat=lat_edge,
             lon=lon_edge,
             mode='markers',
@@ -1098,7 +1110,7 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
         lon_site = float(cell.get("lon", lon_center))
         cell_az = float(cell.get("antenna_azimuth_deg", antenna_azimuth_deg))
 
-        fig.add_trace(go.Scattermapbox(
+        fig.add_trace(go.Scattermap(
             lat=[lat_site], lon=[lon_site],
             mode='markers+text',
             marker=dict(size=11, color=site_color),
@@ -1118,7 +1130,7 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
             lat_site,
             lon_site,
         )
-        fig.add_trace(go.Scattermapbox(
+        fig.add_trace(go.Scattermap(
             lat=lat_dir.tolist(), lon=lon_dir.tolist(),
             mode='lines', line=dict(width=2, color=azimuth_line_color),
             hoverinfo='skip', showlegend=False,
@@ -1146,12 +1158,10 @@ def generate_az_el_heatmap(beam_set_key, ru_type, freq_ghz, d_h_lam, d_v_lam,
             ),
             font=dict(size=14, color='#333')
         ),
-        mapbox=dict(
+        map=dict(
             style=map_style,
             center=dict(lat=lat_center, lon=lon_center),
             zoom=map_zoom,
-            pitch=map_pitch,
-            bearing=map_bearing,
         ),
         height=980,
         margin=dict(l=55, r=20, t=60, b=45),
@@ -1841,18 +1851,23 @@ app.layout = dbc.Container([
                         inline=True,
                         className="mb-2",
                     ),
-                    html.Label("Map Theme", className="fw-bold", style={"color": "#333", "fontSize": "13px"}),
+                    html.Label("Map Theme (OSM / token-free)", className="fw-bold", style={"color": "#333", "fontSize": "13px"}),
                     dcc.Dropdown(
                         id="map_theme_mode",
                         options=[
-                            {"label": "Carto Positron (Light)", "value": "carto-positron"},
                             {"label": "OpenStreetMap (Standard)", "value": "open-street-map"},
-                            {"label": "Stamen Terrain", "value": "stamen-terrain"},
-                            {"label": "Carto DarkMatter", "value": "carto-darkmatter"},
-                            {"label": "Stamen Toner", "value": "stamen-toner"},
+                            {"label": "OpenStreetMap (No Labels)", "value": "carto-positron-nolabels"},
+                            {"label": "Plain White Background", "value": "white-bg"},
                         ],
-                        value="carto-positron",
+                        value="open-street-map",
                         clearable=False,
+                        className="mb-2",
+                    ),
+                    html.Small(
+                        "Tiles load directly from openstreetmap.org — no Mapbox token required. "
+                        "Near-3D pitch is not supported with this tile provider, so the view is "
+                        "always flat 2D regardless of the perspective setting above.",
+                        style={"color": "#666", "fontSize": "11px"},
                         className="mb-2",
                     ),
                     dcc.Loading(
